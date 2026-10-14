@@ -23,8 +23,9 @@ import {
   VStack,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import { createAgentActivityComponent } from "./agent-activity.js";
 import { BtwPasteGuard, type BtwShortcuts, getBtwShortcuts } from "./keybindings.js";
-import type { BtwThinkingLevel, SideThreadTurn } from "./side-thread.js";
+import type { BtwThinkingLevel, SideAgentActivity, SideThreadTurn } from "./side-thread.js";
 import { sanitizeSingleLine } from "./text.js";
 import type { BtwFullscreenLayoutComponent } from "./workspace-layout.js";
 
@@ -318,6 +319,7 @@ export class BtwAnsweringView implements BtwFullscreenLayoutComponent, Focusable
   private finished = false;
   private isFocused = false;
   private thinkingLevel: BtwThinkingLevel | undefined;
+  private activity: readonly SideAgentActivity[] = [];
 
   constructor(
     private readonly tui: TUI,
@@ -335,6 +337,7 @@ export class BtwAnsweringView implements BtwFullscreenLayoutComponent, Focusable
       pendingQuestion,
       options.markdownTransformers,
     );
+    this.transcriptComponents.push(createAgentActivityComponent(() => this.activity, this.theme, true));
     this.thinkingLevel = options.steering?.thinking?.level ?? thinkingLevel;
     this.loader = new Loader(
       this.tui,
@@ -484,6 +487,13 @@ export class BtwAnsweringView implements BtwFullscreenLayoutComponent, Focusable
     this.loader.stop();
   }
 
+  /** Show live tool activity from a tool-enabled side turn. */
+  setActivity(activity: readonly SideAgentActivity[]): void {
+    if (this.finished) return;
+    this.activity = activity;
+    this.tui.requestRender();
+  }
+
   dispose(): void {
     if (this.finished) {
       this.loader.stop();
@@ -587,13 +597,20 @@ function buildTranscriptComponents(
       });
       return [question, error];
     }
+    const activity = turn.activity?.length
+      ? [createAgentActivityComponent(() => turn.activity ?? [], theme, false)]
+      : [];
     const response: AssistantMessage = {
       ...turn.response,
       content: [{ type: "text", text: escapeTerminalControls(turn.answer) }],
       stopReason: "stop",
       errorMessage: undefined,
     };
-    return [question, new AssistantMessageComponent(response, true, getMarkdownTheme(), "", 1, markdownTransformers)];
+    return [
+      question,
+      ...activity,
+      new AssistantMessageComponent(response, true, getMarkdownTheme(), "", 1, markdownTransformers),
+    ];
   });
   if (pendingQuestion) {
     components.push(

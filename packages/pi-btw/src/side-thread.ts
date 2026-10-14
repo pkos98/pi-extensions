@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   Api,
   AssistantMessage,
@@ -30,12 +31,24 @@ export interface CompleteSimpleFunction {
   appliesRequestHeaderTransforms?: boolean;
 }
 
+export interface SideToolCallSummary {
+  id: string;
+  name: string;
+  args: string;
+  status: "running" | "done" | "error";
+  output?: string;
+}
+
+/** Tool calls and interim assistant text produced while a tool-enabled side turn runs. */
+export type SideAgentActivity = { kind: "text"; text: string } | { kind: "tool"; call: SideToolCallSummary };
+
 export type SideThreadTurn =
   | {
       kind: "answered";
       question: string;
       answer: string;
       response: AssistantMessage;
+      activity?: readonly SideAgentActivity[];
     }
   | {
       kind: "error";
@@ -51,6 +64,8 @@ export interface SideThread {
    * Kept separate from the main Pi session so side requests never share its cache or affinity lane.
    */
   routingSessionId: string;
+  /** Full agent transcript (system, tool calls, tool results) once a tool-enabled turn has answered. */
+  agentMessages?: AgentMessage[];
 }
 
 export function createSideThread(conversationContext: string): SideThread {
@@ -204,7 +219,7 @@ export function buildFollowUpPrompt(question: string): string {
   return ["Continue the same side conversation.", "", "<side_question>", question, "</side_question>"].join("\n");
 }
 
-function createUserMessage(text: string): UserMessage {
+export function createUserMessage(text: string): UserMessage {
   return {
     role: "user",
     content: [{ type: "text", text }],
@@ -225,6 +240,24 @@ function getOpencodeSessionHeaders(
 ): ProviderHeaders | undefined {
   if (!sessionId || (model.provider !== "opencode" && model.provider !== "opencode-go")) return undefined;
   return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
+}
+
+/** Add OpenCode attribution headers to request options for callbacks that apply request header transforms. */
+export function withSessionHeaderTransform<TOptions extends ModelsSimpleStreamOptions>(
+  options: TOptions,
+  model: Pick<Model<Api>, "provider">,
+  sessionId: string | undefined,
+): TOptions {
+  const sessionHeaders = getOpencodeSessionHeaders(model, sessionId);
+  if (!sessionHeaders) return options;
+  const transformHeaders = options.transformHeaders;
+  return {
+    ...options,
+    transformHeaders: async (headers) => {
+      const transformed = transformHeaders ? await transformHeaders(headers) : headers;
+      return mergeSessionHeaders(transformed, sessionHeaders) ?? {};
+    },
+  };
 }
 
 function mergeSessionHeaders(

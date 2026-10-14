@@ -1,5 +1,16 @@
+import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import { type Api, clampThinkingLevel, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+  createBashTool,
+  createEditTool,
+  createFindTool,
+  createGrepTool,
+  createLsTool,
+  createReadTool,
+  createWriteTool,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import type { MenuContext, RunMenuResult } from "@narumitw/pi-tui-kit";
 import {
   type BtwBringToMainSegment,
@@ -25,14 +36,17 @@ import {
 } from "./menu.js";
 import {
   type BtwSettings,
+  type BtwToolName,
   effectiveBtwLayout,
   effectiveBtwSidePaneRatio,
+  effectiveBtwTools,
   effectiveFullscreenCopyOnSelect,
   effectiveRememberThinkingLevelChanges,
   parseBtwModelReference,
   readBtwSettings,
   updateBtwSettings,
 } from "./settings.js";
+import { BTW_AGENT_SYSTEM_PROMPT_NOTE, completeSideAgentTurn } from "./side-agent.js";
 import {
   BTW_THINKING_LEVELS,
   type BtwThinkingLevel,
@@ -41,6 +55,7 @@ import {
   createSideThread,
   type SideQuestionAuth,
   type SideThread,
+  withSessionHeaderTransform,
 } from "./side-thread.js";
 import { sanitizeSingleLine } from "./text.js";
 import { type BtwMarkdownTransformers, prepareBtwTranscriptMarkdown } from "./transcript-markdown.js";
@@ -84,6 +99,38 @@ export function createModelRegistryCompleteSimple(modelRegistry: BtwCompletionRe
     modelRegistry.streamSimple(model, context, options).result();
   completeSimple.appliesRequestHeaderTransforms = true;
   return completeSimple;
+}
+
+const BTW_TOOL_FACTORIES: Record<BtwToolName, (cwd: string) => AgentTool> = {
+  read: createReadTool,
+  bash: createBashTool,
+  edit: createEditTool,
+  write: createWriteTool,
+  grep: createGrepTool,
+  find: createFindTool,
+  ls: createLsTool,
+};
+
+export function createBtwTools(names: readonly BtwToolName[], cwd: string): AgentTool[] {
+  return names.map((name) => BTW_TOOL_FACTORIES[name](cwd));
+}
+
+function createModelRegistryStreamFn(
+  modelRegistry: BtwCompletionRegistry,
+  mainSessionId: string | undefined,
+): StreamFn {
+  return (model, context, options) =>
+    modelRegistry.streamSimple(model, context, withSessionHeaderTransform(options ?? {}, model, mainSessionId));
+}
+
+function buildBtwAgentSystemPrompt(ctx: ExtensionCommandContext): string {
+  let mainPrompt = "";
+  try {
+    mainPrompt = ctx.getSystemPrompt().trim();
+  } catch {
+    // A replaced command context cannot provide the main prompt; the side-thread note still applies.
+  }
+  return mainPrompt ? `${mainPrompt}\n\n${BTW_AGENT_SYSTEM_PROMPT_NOTE}` : BTW_AGENT_SYSTEM_PROMPT_NOTE;
 }
 
 interface ResolveBtwModelOptions {
@@ -156,7 +203,7 @@ export async function loadBtwThinkingLevel(
 
   options.warn?.(
     sanitizeSingleLine(
-      `pi-btw settings ignored: ${settings.reason}; expected optional model "provider/model-id", omitted thinkingLevel for Same as main thread or thinkingLevel "${BTW_THINKING_LEVELS.join('" | "')}", boolean rememberThinkingLevelChanges, boolean fullscreenCopyOnSelect, layout "fullscreen" | "left-pane" | "right-pane", and sidePaneRatio from 0.2 to 0.8. Using current Pi thinking level.`,
+      `pi-btw settings ignored: ${settings.reason}; expected optional model "provider/model-id", omitted thinkingLevel for Same as main thread or thinkingLevel "${BTW_THINKING_LEVELS.join('" | "')}", boolean rememberThinkingLevelChanges, boolean fullscreenCopyOnSelect, layout "fullscreen" | "left-pane" | "right-pane", sidePaneRatio from 0.2 to 0.8, and tools from "read" | "bash" | "edit" | "write" | "grep" | "find" | "ls". Using current Pi thinking level.`,
     ),
   );
   return currentThinkingLevel;
@@ -302,6 +349,7 @@ export default function btw(pi: ExtensionAPI, dependencies: BtwExtensionDependen
               selected: resolution.selected,
               thinkingLevel: state.thinkingLevel,
               rememberThinkingLevelChanges: !sameAsMainThinkingLevel && effectiveRememberThinkingLevelChanges(settings),
+              toolNames: effectiveBtwTools(settings),
               state,
               ctx: fullscreenCtx,
             });
@@ -403,6 +451,8 @@ interface RunBtwThreadOptions {
   thinkingLevel: BtwThinkingLevel;
   rememberThinkingLevelChanges?: boolean;
   settingsPath?: string;
+  /** Tools the side thread may call; empty keeps the single-call answer-only behavior. */
+  toolNames?: readonly BtwToolName[];
   state?: BtwThreadState;
   ctx: ExtensionCommandContext;
   dependencies?: RunBtwThreadDependencies;
@@ -414,6 +464,7 @@ export async function runBtwThread({
   thinkingLevel,
   rememberThinkingLevelChanges = false,
   settingsPath,
+  toolNames = [],
   state,
   ctx,
   dependencies = {},
@@ -479,11 +530,19 @@ export async function runBtwThread({
         pendingQuestion = action.question;
       }
 
-      const result = await ask(thread, pendingQuestion, selected, activeThinkingLevel, ctx, {
-        questions: steeringQuestions,
-        submit: (question) => steeringQuestions.push(question),
-        thinking: createThinkingControl(),
-      });
+      const result = await ask(
+        thread,
+        pendingQuestion,
+        selected,
+        activeThinkingLevel,
+        ctx,
+        {
+          questions: steeringQuestions,
+          submit: (question) => steeringQuestions.push(question),
+          thinking: createThinkingControl(),
+        },
+        toolNames,
+      );
       if (result.kind === "aborted") {
         notifySafely(ctx, "Cancelled", "info");
         return { kind: "closed" };
@@ -786,6 +845,7 @@ async function askThreadQuestion(
   thinkingLevel: BtwThinkingLevel,
   ctx: ExtensionCommandContext,
   steering: BtwThreadSteeringControl,
+  toolNames: readonly BtwToolName[] = [],
 ) {
   const createMarkdownTransformers = await prepareCurrentTranscriptMarkdown(thread, question, ctx);
   if (!createMarkdownTransformers) return { kind: "aborted" as const };
@@ -811,15 +871,29 @@ async function askThreadQuestion(
         },
       },
     );
-    completeSideThreadTurn({
-      thread,
-      question,
-      model: selected.model,
-      thinkingLevel,
-      signal: view.signal,
-      completeSimple: createModelRegistryCompleteSimple(ctx.modelRegistry),
-      sessionId: readBtwSessionId(ctx),
-    }).then((result) => {
+    const turn =
+      toolNames.length > 0
+        ? completeSideAgentTurn({
+            thread,
+            question,
+            model: selected.model,
+            thinkingLevel,
+            tools: createBtwTools(toolNames, ctx.cwd),
+            systemPrompt: buildBtwAgentSystemPrompt(ctx),
+            streamFn: createModelRegistryStreamFn(ctx.modelRegistry, readBtwSessionId(ctx)),
+            signal: view.signal,
+            onActivity: (activity) => view.setActivity(activity),
+          })
+        : completeSideThreadTurn({
+            thread,
+            question,
+            model: selected.model,
+            thinkingLevel,
+            signal: view.signal,
+            completeSimple: createModelRegistryCompleteSimple(ctx.modelRegistry),
+            sessionId: readBtwSessionId(ctx),
+          });
+    turn.then((result) => {
       if (settled) return;
       settled = true;
       view.finish();

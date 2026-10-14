@@ -16,6 +16,7 @@ Only context you explicitly bring back is loaded into the main editor.
 - Brings back the latest answer, a question suffix, an exact range, or the complete thread only when requested.
 - Uses Pi's current model and thinking level or saved pi-btw choices.
 - Offers BTW-only exit, thinking-cycle, and bring-to-main keybindings.
+- Optionally lets the side thread call Pi's built-in coding tools (experimental, off by default).
 
 ## 📦 Install
 
@@ -125,6 +126,25 @@ The mouse wheel scrolls the pane under the pointer without moving keyboard focus
 If you selected context from the main-thread tree, the main pane still shows the active main thread while the side model receives the selected branch.
 Pane layouts collapse to the side thread alone below 80 terminal columns and return keyboard focus to it.
 Choose **Side-thread layout** in Settings; changes apply the next time a new or resumed BTW workspace opens.
+
+### Tools (experimental)
+
+> [!WARNING]
+> Tool-enabled side threads run with your user permissions and can change files while the main agent is working on them.
+
+`tools` lists the built-in Pi tools the side thread may call and defaults to `[]`, which keeps the single-call, answer-only behavior.
+Accepted values are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`; tools run in the main session's working directory.
+
+```json
+{
+  "tools": ["read", "bash", "grep", "find", "ls"]
+}
+```
+
+With tools enabled, each side question runs Pi's agent loop with the side model: it receives the main session's system prompt plus a side-thread note, and the side thread shows tool calls, interim notes, and a short output tail while it works.
+Follow-up questions replay earlier tool calls and results; only the final answers count for bring-to-main.
+Extension and MCP tools are not available in the side thread, and long tool sessions are not compacted.
+Cancelling aborts the running tool, but changes a tool already made remain.
 
 ### Keybindings
 

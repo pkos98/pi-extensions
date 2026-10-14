@@ -15,6 +15,10 @@ export const DEFAULT_REMEMBER_THINKING_LEVEL_CHANGES = true;
 export const DEFAULT_BTW_SIDE_PANE_RATIO = 0.5;
 export const MIN_BTW_SIDE_PANE_RATIO = 0.2;
 export const MAX_BTW_SIDE_PANE_RATIO = 0.8;
+export const BTW_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+export type BtwToolName = (typeof BTW_TOOL_NAMES)[number];
+// Experimental: side threads stay answer-only unless `tools` is configured explicitly.
+export const DEFAULT_BTW_TOOLS: readonly BtwToolName[] = [];
 const MAX_SETTINGS_BYTES = 64 * 1024;
 
 export interface BtwSettings {
@@ -25,6 +29,7 @@ export interface BtwSettings {
   fullscreenCopyOnSelect?: boolean;
   layout?: BtwLayout;
   sidePaneRatio?: number;
+  tools?: BtwToolName[];
 }
 
 export type BtwSettingsLoadResult =
@@ -103,6 +108,11 @@ export function normalizeBtwSettings(value: unknown): BtwSettings | undefined {
     if (!isBtwSidePaneRatio(sidePaneRatio)) return undefined;
     settings.sidePaneRatio = sidePaneRatio;
   }
+  if (Object.hasOwn(value, "tools")) {
+    const tools = Reflect.get(value, "tools");
+    if (!Array.isArray(tools) || !tools.every(isBtwToolName)) return undefined;
+    settings.tools = [...new Set(tools)];
+  }
   return settings;
 }
 
@@ -127,6 +137,10 @@ export function effectiveRememberThinkingLevelChanges(settings: BtwSettings): bo
 
 export function effectiveBtwSidePaneRatio(settings: BtwSettings): number {
   return isBtwSidePaneRatio(settings.sidePaneRatio) ? settings.sidePaneRatio : DEFAULT_BTW_SIDE_PANE_RATIO;
+}
+
+export function effectiveBtwTools(settings: BtwSettings): readonly BtwToolName[] {
+  return settings.tools ?? DEFAULT_BTW_TOOLS;
 }
 
 export async function readBtwSettings(settingsPath = btwSettingsPath()): Promise<BtwSettingsLoadResult> {
@@ -315,6 +329,10 @@ function isSettingsDocument(value: unknown): value is SettingsDocument {
 
 function isBtwThinkingLevel(value: unknown): value is BtwThinkingLevel {
   return BTW_THINKING_LEVELS.includes(value as BtwThinkingLevel);
+}
+
+function isBtwToolName(value: unknown): value is BtwToolName {
+  return BTW_TOOL_NAMES.includes(value as BtwToolName);
 }
 
 function isBtwLayout(value: unknown): value is BtwLayout {
